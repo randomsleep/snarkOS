@@ -15,6 +15,7 @@
 mod router;
 
 use crate::traits::NodeInterface;
+use rand::Rng;
 use snarkos_account::Account;
 use snarkos_node_bft::{helpers::init_primary_channels, ledger_service::CoreLedgerService};
 use snarkos_node_consensus::Consensus;
@@ -345,74 +346,105 @@ impl<N: Network, C: ConsensusStorage<N>> Validator<N, C> {
         };
         use std::str::FromStr;
 
-        // Initialize the locator.
-        let locator = (ProgramID::from_str("credits.aleo")?, Identifier::from_str("transfer_public")?);
+        let dev_id = match dev {
+            Some(id) => id,
+            None => return Ok(()),
+        };
 
-        // Determine whether to start the loop.
-        match dev {
-            // If the node is running in development mode, only generate if you are allowed.
-            Some(dev) => {
-                // If the node is not the first node, do not start the loop.
-                if dev != 0 {
-                    return Ok(());
+        if dev_id == 0 {
+            // Dev 0 send transfer_public transaction to avoid starve the network
+            let self_ = self.clone();
+            // Initialize the locator.
+            let locator = (ProgramID::from_str("credits.aleo")?, Identifier::from_str("transfer_public")?);
+
+            self.spawn(async move {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                info!("Starting transaction pool...");
+
+                // Start the transaction loop.
+                loop {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    // Prepare the inputs.
+                    let inputs =
+                        [Value::from(Literal::Address(self_.address())), Value::from(Literal::U64(U64::new(1)))];
+                    // Execute the transaction.
+                    let transaction = match self_.ledger.vm().execute(
+                        self_.private_key(),
+                        locator,
+                        inputs.into_iter(),
+                        None,
+                        0, // set priority to 0 to make it easier to simulate
+                        None,
+                        &mut rand::thread_rng(),
+                    ) {
+                        Ok(transaction) => transaction,
+                        Err(error) => {
+                            error!("Transaction pool encountered an execution error - {error}");
+                            continue;
+                        }
+                    };
+                    // Broadcast the transaction.
+                    if self_
+                        .unconfirmed_transaction(
+                            self_.router.local_ip(),
+                            UnconfirmedTransaction::from(transaction.clone()),
+                            transaction.clone(),
+                        )
+                        .await
+                    {
+                        info!("Transaction pool broadcasted the transaction");
+                    }
                 }
-            }
-            None => {
-                // Retrieve the genesis committee.
-                let Ok(Some(committee)) = self.ledger.get_committee_for_round(0) else {
-                    // If the genesis committee is not available, do not start the loop.
-                    return Ok(());
-                };
-                // Retrieve the first member.
-                // Note: It is guaranteed that the committee has at least one member.
-                let first_member = committee.members().first().unwrap().0;
-                // If the node is not the first member, do not start the loop.
-                if self.address() != *first_member {
-                    return Ok(());
+            });
+        } else {
+            // Dev 1, 2, and 3 send random bond_public transaction
+            let self_ = self.clone();
+            let locator_bond = (ProgramID::from_str("credits.aleo")?, Identifier::from_str("bond_public")?);
+            self.spawn(async move {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                info!("Starting transaction pool...");
+
+                // Start the transaction loop.
+                loop {
+                    // Random sleep
+                    let sleep_time = rand::thread_rng().gen_range(1000..5000);
+                    tokio::time::sleep(Duration::from_millis(sleep_time)).await;
+                    let to_address = Literal::Address(self_.address());
+                    // Bond ramdom amount to myself
+                    let bond_amount = rand::thread_rng().gen_range(1_000_000u64..2_000_000u64);
+                    let inputs = [Value::from(to_address), Value::from(Literal::U64(U64::new(bond_amount)))];
+                    // Execute the transaction.
+                    let transaction = match self_.ledger.vm().execute(
+                        self_.private_key(),
+                        locator_bond,
+                        inputs.into_iter(),
+                        None,
+                        0, // set priority to 0 to make it easier to simulate
+                        None,
+                        &mut rand::thread_rng(),
+                    ) {
+                        Ok(transaction) => transaction,
+                        Err(error) => {
+                            error!("Transaction pool encountered an execution error - {error}");
+                            continue;
+                        }
+                    };
+                    // Broadcast the transaction.
+                    info!("Validator {dev_id} bount amount {bond_amount} to itself");
+                    if self_
+                        .unconfirmed_transaction(
+                            self_.router.local_ip(),
+                            UnconfirmedTransaction::from(transaction.clone()),
+                            transaction.clone(),
+                        )
+                        .await
+                    {
+                        info!("Transaction pool broadcasted the transaction");
+                    }
                 }
-            }
+            });
         }
 
-        let self_ = self.clone();
-        self.spawn(async move {
-            tokio::time::sleep(Duration::from_secs(3)).await;
-            info!("Starting transaction pool...");
-
-            // Start the transaction loop.
-            loop {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-
-                // Prepare the inputs.
-                let inputs = [Value::from(Literal::Address(self_.address())), Value::from(Literal::U64(U64::new(1)))];
-                // Execute the transaction.
-                let transaction = match self_.ledger.vm().execute(
-                    self_.private_key(),
-                    locator,
-                    inputs.into_iter(),
-                    None,
-                    10_000,
-                    None,
-                    &mut rand::thread_rng(),
-                ) {
-                    Ok(transaction) => transaction,
-                    Err(error) => {
-                        error!("Transaction pool encountered an execution error - {error}");
-                        continue;
-                    }
-                };
-                // Broadcast the transaction.
-                if self_
-                    .unconfirmed_transaction(
-                        self_.router.local_ip(),
-                        UnconfirmedTransaction::from(transaction.clone()),
-                        transaction.clone(),
-                    )
-                    .await
-                {
-                    info!("Transaction pool broadcasted the transaction");
-                }
-            }
-        });
         Ok(())
     }
 

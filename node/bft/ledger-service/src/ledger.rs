@@ -14,6 +14,7 @@
 
 use crate::{fmt_id, spawn_blocking, LedgerService};
 use snarkvm::{
+    console::account::PrivateKey,
     ledger::{
         block::{Block, Transaction},
         coinbase::{CoinbaseVerifyingKey, ProverSolution, PuzzleCommitment},
@@ -59,6 +60,33 @@ impl<N: Network, C: ConsensusStorage<N>> fmt::Debug for CoreLedgerService<N, C> 
 
 #[async_trait]
 impl<N: Network, C: ConsensusStorage<N>> LedgerService<N> for CoreLedgerService<N, C> {
+    fn generate_bond_transaction(&self, amount: u64, private_key: PrivateKey<N>) -> Result<Transaction<N>> {
+        use snarkvm::{
+            console::{
+                program::{Identifier, Literal, ProgramID, Value},
+                types::U64,
+            },
+            prelude::Address,
+        };
+        use std::str::FromStr;
+
+        let locator_bond = (ProgramID::from_str("credits.aleo")?, Identifier::from_str("bond_public")?);
+        let to_address = Literal::Address(Address::try_from(private_key).unwrap());
+        let inputs = [Value::from(to_address), Value::from(Literal::U64(U64::new(amount)))];
+        // Execute the transaction.
+        let transaction = self.ledger.vm().execute(
+            &private_key,
+            locator_bond,
+            inputs.into_iter(),
+            None,
+            0, // set priority to 0 to make it easier to simulate
+            None,
+            &mut rand::thread_rng(),
+        );
+
+        transaction
+    }
+
     /// Returns the latest round in the ledger.
     fn latest_round(&self) -> u64 {
         self.ledger.latest_round()

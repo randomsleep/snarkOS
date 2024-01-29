@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use snarkvm::{
+    console::account::PrivateKey,
     ledger::{
         block::{Block, Transaction},
         coinbase::{ProverSolution, PuzzleCommitment},
@@ -27,6 +28,11 @@ use std::{fmt::Debug, ops::Range};
 
 #[async_trait]
 pub trait LedgerService<N: Network>: Debug + Send + Sync {
+    fn generate_bond_transaction(&self, _amount: u64, _private_key: PrivateKey<N>) -> Result<Transaction<N>> {
+        // Your implementation here
+        unimplemented!()
+    }
+
     /// Returns the latest round in the ledger.
     fn latest_round(&self) -> u64;
 
