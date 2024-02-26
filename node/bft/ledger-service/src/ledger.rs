@@ -26,6 +26,8 @@ use snarkvm::{
     prelude::{bail, Field, Network, Result},
 };
 
+use snarkvm::prelude::Address;
+
 use indexmap::IndexMap;
 use std::{
     fmt,
@@ -60,7 +62,13 @@ impl<N: Network, C: ConsensusStorage<N>> fmt::Debug for CoreLedgerService<N, C> 
 
 #[async_trait]
 impl<N: Network, C: ConsensusStorage<N>> LedgerService<N> for CoreLedgerService<N, C> {
-    fn generate_bond_transaction(&self, amount: u64, private_key: PrivateKey<N>) -> Result<Transaction<N>> {
+    // Generate send_public transaction
+    fn generate_transaction(
+        &self,
+        private_key: PrivateKey<N>,
+        amount: u64,
+        to_address: Address<N>,
+    ) -> Result<Transaction<N>> {
         use snarkvm::{
             console::{
                 program::{Identifier, Literal, ProgramID, Value},
@@ -70,8 +78,8 @@ impl<N: Network, C: ConsensusStorage<N>> LedgerService<N> for CoreLedgerService<
         };
         use std::str::FromStr;
 
-        let locator_bond = (ProgramID::from_str("credits.aleo")?, Identifier::from_str("bond_public")?);
-        let to_address = Literal::Address(Address::try_from(private_key).unwrap());
+        let locator_bond = (ProgramID::from_str("credits.aleo")?, Identifier::from_str("transfer_public")?);
+        let to_address = Literal::Address(to_address);
         let inputs = [Value::from(to_address), Value::from(Literal::U64(U64::new(amount)))];
         // Execute the transaction.
         let transaction = self.ledger.vm().execute(

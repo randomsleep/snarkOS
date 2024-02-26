@@ -24,11 +24,17 @@ use snarkvm::{
 };
 
 use indexmap::IndexMap;
+use snarkvm::prelude::Address;
 use std::{fmt::Debug, ops::Range};
 
 #[async_trait]
 pub trait LedgerService<N: Network>: Debug + Send + Sync {
-    fn generate_bond_transaction(&self, _amount: u64, _private_key: PrivateKey<N>) -> Result<Transaction<N>> {
+    fn generate_transaction(
+        &self,
+        private_key: PrivateKey<N>,
+        amount: u64,
+        to_address: Address<N>,
+    ) -> Result<Transaction<N>> {
         // Your implementation here
         unimplemented!()
     }

@@ -345,41 +345,6 @@ impl<N: Network> Consensus<N> {
         // Create the candidate next block.
         let next_block = self.ledger.prepare_advance_to_next_quorum_block(subdag, transmissions)?;
 
-        info!(
-            "next_block {} round {} transactions {} aborts {}",
-            next_block.height(),
-            next_block.round(),
-            next_block.transactions().len(),
-            next_block.aborted_transaction_ids().len(),
-        );
-        let is_bond = |transaction: Transaction<N>| {
-            if let Transaction::Execute(_, execute, _) = transaction {
-                let transition = execute.peek().unwrap();
-                return transition.program_id().to_string() == "credits.aleo"
-                    && transition.function_name().to_string() == "bond_public";
-            }
-            false
-        };
-
-        {
-            // Just print for debug
-            for (i, tx) in next_block.transactions().iter().enumerate() {
-                match tx {
-                    ConfirmedTransaction::AcceptedExecute(_, transaction, _) => {
-                        if is_bond(transaction.clone()) {
-                            info!("bond_public transaction {} {}", i, transaction.id());
-                        }
-                    }
-                    ConfirmedTransaction::RejectedExecute(_, transaction, _, _) => {
-                        if is_bond(transaction.clone()) {
-                            info!("bond_public rejected transaction {} {}", i, transaction.id());
-                        }
-                    }
-                    _ => continue,
-                }
-            }
-        }
-
         // Check that the block is well-formed.
         self.ledger.check_next_block(&next_block)?;
         // Advance to the next block.
